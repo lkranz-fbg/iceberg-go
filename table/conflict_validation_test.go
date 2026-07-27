@@ -188,7 +188,7 @@ func TestNewConflictContext_NoConcurrentCommits(t *testing.T) {
 	head := int64(42)
 	meta := newConflictTestMetadata(t, &head)
 
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 	assert.Empty(t, ctx.concurrent)
 }
@@ -203,7 +203,7 @@ func TestNewConflictContext_WriterHasNoBranchView(t *testing.T) {
 	head := int64(7)
 	current := newConflictTestMetadata(t, &head)
 
-	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.NoError(t, err)
 	require.Len(t, ctx.concurrent, 1)
 	assert.Equal(t, int64(7), ctx.concurrent[0].SnapshotID)
@@ -217,7 +217,7 @@ func TestNewConflictContext_EmptyBaseEnumeratesFullAncestry(t *testing.T) {
 	base := newConflictTestMetadata(t, nil)
 	current := newConflictTestMetadataWithChain(t, []int64{10, 11, 12})
 
-	ctx, err := newConflictContext(base, current, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.NoError(t, err)
 	require.Len(t, ctx.concurrent, 3)
 	assert.Equal(t, int64(12), ctx.concurrent[0].SnapshotID)
@@ -232,7 +232,7 @@ func TestNewConflictContext_MissingCurrentBranch(t *testing.T) {
 	base := newConflictTestMetadata(t, &head)
 	current := newConflictTestMetadata(t, nil)
 
-	_, err := newConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -248,7 +248,7 @@ func TestNewConflictContext_BaseNotInCurrentAncestry(t *testing.T) {
 	base := newConflictTestMetadata(t, &baseHead)
 	current := newConflictTestMetadata(t, &currentHead)
 
-	_, err := newConflictContext(base, current, MainBranch, nil, true)
+	_, err := newConflictContext(t.Context(), base, current, MainBranch, nil, true)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrCommitDiverged)
 	assert.False(t, errors.Is(err, ErrCommitFailed),
@@ -261,7 +261,7 @@ func TestValidateDataFilesExist_EmptyInput(t *testing.T) {
 	// touching metadata or the filesystem.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateDataFilesExist(ctx, nil))
@@ -273,7 +273,7 @@ func TestValidateNoNewDeletesForRewrittenFiles_EmptyInputs(t *testing.T) {
 	// short-circuit to nil.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	// Empty rewrittenPaths.
@@ -289,7 +289,7 @@ func TestValidateAddedDataFilesMatchingFilter_NoConcurrent(t *testing.T) {
 	// regardless of filter.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateAddedDataFilesMatchingFilter(ctx, iceberg.AlwaysTrue{}))
@@ -301,7 +301,7 @@ func TestValidateNoConflictingDataFiles_SnapshotIsolationIsNoOp(t *testing.T) {
 	// even attempt to enumerate concurrent snapshots.
 	head := int64(1)
 	meta := newConflictTestMetadata(t, &head)
-	ctx, err := newConflictContext(meta, meta, MainBranch, nil, true)
+	ctx, err := newConflictContext(t.Context(), meta, meta, MainBranch, nil, true)
 	require.NoError(t, err)
 
 	require.NoError(t, validateNoConflictingDataFiles(ctx, iceberg.AlwaysTrue{}, IsolationSnapshot))
