@@ -492,7 +492,7 @@ func (t Table) doCommit(ctx context.Context, updates []Update, reqs []Requiremen
 			// level case-sensitivity is not yet threaded through the
 			// Commit path, and true is the scan default throughout the
 			// codebase.
-			cc, ccErr := newConflictContext(t.metadata, current, co.branch, fs, true)
+			cc, ccErr := newConflictContext(retryCtx, t.metadata, current, co.branch, fs, true)
 			if ccErr != nil {
 				// ErrCommitDiverged — terminal, do not retry. The
 				// sentinel deliberately does not wrap ErrCommitFailed.

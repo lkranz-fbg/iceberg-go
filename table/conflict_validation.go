@@ -47,13 +47,16 @@ package table
 // outputs are public.
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 // IsolationLevel controls how strictly a commit rejects concurrent
@@ -157,8 +160,9 @@ var (
 // same context across retry attempts that re-fetch catalog state,
 // because the cached concurrent-snapshot walk becomes stale. There
 // is deliberately no Refresh or mutator method; a refresh must flow
-// as a fresh call to newConflictContext(newBase, newCurrent, ...).
+// as a fresh call to newConflictContext(ctx, newBase, newCurrent, ...).
 type conflictContext struct {
+	operationCtx  context.Context
 	current       Metadata
 	branch        string
 	fs            iceio.IO
@@ -182,7 +186,10 @@ type conflictContext struct {
 // branch (divergent commit, expired base), newConflictContext returns
 // ErrCommitDiverged; the commit cannot be safely revalidated without
 // a refresh-and-rebuild.
-func newConflictContext(base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
+func newConflictContext(operationCtx context.Context, base, current Metadata, branch string, fs iceio.IO, caseSensitive bool) (*conflictContext, error) {
+	if operationCtx == nil {
+		operationCtx = context.Background()
+	}
 	currentHead := current.SnapshotByName(branch)
 	if currentHead == nil {
 		// Branch does not exist on the current side — either it was
@@ -207,6 +214,7 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 		}
 
 		return &conflictContext{
+			operationCtx:  operationCtx,
 			current:       current,
 			branch:        branch,
 			fs:            fs,
@@ -222,6 +230,7 @@ func newConflictContext(base, current Metadata, branch string, fs iceio.IO, case
 	}
 
 	return &conflictContext{
+		operationCtx:  operationCtx,
 		current:       current,
 		branch:        branch,
 		fs:            fs,
@@ -278,8 +287,8 @@ func (c *conflictContext) forEachAddedEntry(content iceberg.ManifestContent, vis
 // snapshot's data files.
 //
 // Cost is O(all data manifests × all entries) regardless of
-// len(referencedPaths); callers MUST batch referenced paths into a
-// single call rather than calling once per path.
+// len(referencedPaths); manifest reads are bounded by GOMAXPROCS.
+// Callers MUST batch referenced paths into a single call.
 func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) error {
 	if len(referencedPaths) == 0 {
 		return nil
@@ -294,15 +303,47 @@ func validateDataFilesExist(ctx *conflictContext, referencedPaths []string) erro
 		return fmt.Errorf("%w: branch %q missing on current metadata", ErrCommitDiverged, ctx.branch)
 	}
 
-	for df, err := range head.dataFiles(ctx.fs, nil) {
-		if err != nil {
-			return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
+	manifests, err := head.Manifests(ctx.fs)
+	if err != nil {
+		return fmt.Errorf("loading manifests for current head %d: %w", head.SnapshotID, err)
+	}
+
+	foundByManifest := make([][]string, len(manifests))
+	workers, workerCtx := errgroup.WithContext(ctx.operationCtx)
+	workers.SetLimit(min(runtime.GOMAXPROCS(0), len(manifests)))
+	var schedulingErr error
+	for i, manifest := range manifests {
+		if manifest.ManifestContent() != iceberg.ManifestContentData {
+			continue
 		}
-		if _, ok := needed[df.FilePath()]; ok {
-			delete(needed, df.FilePath())
-			if len(needed) == 0 {
-				return nil
+		if err := workerCtx.Err(); err != nil {
+			schedulingErr = err
+			break
+		}
+		i, manifest := i, manifest
+		workers.Go(func() error {
+			for entry, err := range manifest.Entries(ctx.fs, false) {
+				if err != nil {
+					return fmt.Errorf("reading manifest %s: %w", manifest.FilePath(), err)
+				}
+				path := entry.DataFile().FilePath()
+				if _, ok := needed[path]; ok {
+					foundByManifest[i] = append(foundByManifest[i], path)
+				}
 			}
+			return nil
+		})
+	}
+	if err := workers.Wait(); err != nil {
+		return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, err)
+	}
+	if schedulingErr != nil {
+		return fmt.Errorf("iterating data files for current head %d: %w", head.SnapshotID, schedulingErr)
+	}
+
+	for _, found := range foundByManifest {
+		for _, path := range found {
+			delete(needed, path)
 		}
 	}
 

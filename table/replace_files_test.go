@@ -223,6 +223,42 @@ func TestReplaceFilesReadsManifestsConcurrently(t *testing.T) {
 	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
 }
 
+func TestRowDeltaValidatesReferencedDataFilesConcurrently(t *testing.T) {
+	fileIO := &concurrentManifestReadIO{}
+	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := make([]string, 4)
+	for i := range dataPaths {
+		dataPaths[i] = fmt.Sprintf("%s/data/conflict-%03d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPaths[i], arrowSc, fmt.Sprintf(`[{"id": %d, "data": "value"}]`, i))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPaths[i]}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	posDelPath := tbl.Location() + "/data/pos-del-conflict-validation.parquet"
+	writeParquetFile(t, posDelPath, table.PositionalDeleteArrowSchema,
+		fmt.Sprintf(`[{"file_path": "%s", "pos": 0}]`, dataPaths[0]))
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		posDelPath, iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	posDelete := builder.ReferencedDataFile(dataPaths[0]).Build()
+
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(posDelete)
+	require.NoError(t, rd.Commit(t.Context()))
+
+	fileIO.enabled.Store(true)
+	_, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
+}
+
 func TestReplaceFiles_DelegatesToReplaceDataFilesWhenNoDeleteFiles(t *testing.T) {
 	tbl := newReplaceFilesTestTable(t)
 
