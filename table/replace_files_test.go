@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -67,10 +68,17 @@ type concurrentManifestReadIO struct {
 	enabled atomic.Bool
 	active  atomic.Int32
 	max     atomic.Int32
+	opened  chan struct{}
 }
 
 func (f *concurrentManifestReadIO) Open(name string) (iceio.File, error) {
 	if f.enabled.Load() && strings.HasSuffix(name, ".avro") {
+		if f.opened != nil {
+			select {
+			case f.opened <- struct{}{}:
+			default:
+			}
+		}
 		active := f.active.Add(1)
 		for current := f.max.Load(); active > current && !f.max.CompareAndSwap(current, active); current = f.max.Load() {
 		}
@@ -257,6 +265,71 @@ func TestRowDeltaValidatesReferencedDataFilesConcurrently(t *testing.T) {
 	_, err = tx.Commit(t.Context())
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
+}
+
+func TestRowDeltaRejectsMissingReferencedDataFile(t *testing.T) {
+	tbl := newReplaceFilesTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/existing.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "value"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/missing-reference-delete.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	posDelete := builder.ReferencedDataFile(tbl.Location() + "/data/missing.parquet").Build()
+
+	tx = tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(posDelete)
+	require.NoError(t, rd.Commit(t.Context()))
+	_, err = tx.Commit(t.Context())
+	require.ErrorIs(t, err, table.ErrDataFilesMissing)
+}
+
+func TestRowDeltaReferencedDataFileValidationPropagatesCancellation(t *testing.T) {
+	fileIO := &concurrentManifestReadIO{opened: make(chan struct{}, 1)}
+	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPaths := make([]string, runtime.GOMAXPROCS(0)+2)
+	for i := range dataPaths {
+		dataPaths[i] = fmt.Sprintf("%s/data/cancel-%03d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPaths[i], arrowSc, fmt.Sprintf(`[{"id": %d, "data": "value"}]`, i))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPaths[i]}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+
+	builder, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec, iceberg.EntryContentPosDeletes,
+		tbl.Location()+"/data/canceled-validation-delete.parquet",
+		iceberg.ParquetFile, nil, nil, nil, 1, 128)
+	require.NoError(t, err)
+	posDelete := builder.ReferencedDataFile(dataPaths[0]).Build()
+	tx := tbl.NewTransaction()
+	rd := tx.NewRowDelta(nil)
+	rd.AddDeletes(posDelete)
+	require.NoError(t, rd.Commit(t.Context()))
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	fileIO.enabled.Store(true)
+	go func() {
+		<-fileIO.opened
+		cancel()
+	}()
+	_, err = tx.Commit(ctx)
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 func TestReplaceFiles_DelegatesToReplaceDataFilesWhenNoDeleteFiles(t *testing.T) {
