@@ -25,6 +25,7 @@ import (
 	"iter"
 	"maps"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,7 +46,7 @@ type producerImpl interface {
 	processManifests(manifests []iceberg.ManifestFile) ([]iceberg.ManifestFile, error)
 	// perform any processing necessary and return the list of existing
 	// manifests that should be included in the snapshot
-	existingManifests() ([]iceberg.ManifestFile, error)
+	existingManifests(ctx context.Context) ([]iceberg.ManifestFile, error)
 	// return the deleted entries for writing delete file manifests
 	deletedEntries(ctx context.Context) ([]iceberg.ManifestEntry, error)
 	// validate runs producer-specific conflict checks against the
@@ -87,7 +88,7 @@ func (fa *fastAppendFiles) processManifests(manifests []iceberg.ManifestFile) ([
 	return manifests, nil
 }
 
-func (fa *fastAppendFiles) existingManifests() ([]iceberg.ManifestFile, error) {
+func (fa *fastAppendFiles) existingManifests(_ context.Context) ([]iceberg.ManifestFile, error) {
 	if fa.base.parentSnapshotID <= 0 {
 		return nil, nil
 	}
@@ -136,6 +137,9 @@ type overwriteFiles struct {
 	// reject a concurrent append into the same partition, which is
 	// semantically compatible with a rewrite.
 	skipDefaultValidator bool
+
+	manifestStagingWorkers  int
+	manifestStagingProgress func(done, total int)
 }
 
 func newOverwriteFilesProducer(op Operation, txn *Transaction, fs iceio.WriteFileIO, commitUUID *uuid.UUID, snapshotProps iceberg.Properties) *snapshotProducer {
@@ -150,89 +154,140 @@ func (of *overwriteFiles) processManifests(manifests []iceberg.ManifestFile) ([]
 	return manifests, nil
 }
 
-func (of *overwriteFiles) existingManifests() ([]iceberg.ManifestFile, error) {
-	// determine if there are any existing manifest files
-	existingFiles := make([]iceberg.ManifestFile, 0)
-
+func (of *overwriteFiles) existingManifests(ctx context.Context) ([]iceberg.ManifestFile, error) {
 	snap := of.base.txn.meta.currentSnapshot()
 	if snap == nil {
-		return existingFiles, nil
+		return nil, nil
 	}
 
 	manifestList, err := snap.Manifests(of.base.io)
 	if err != nil {
-		return existingFiles, err
+		return nil, err
+	}
+	if len(manifestList) == 0 {
+		return nil, nil
+	}
+	if of.manifestStagingProgress != nil {
+		of.manifestStagingProgress(0, len(manifestList))
+	}
+	workers := of.manifestStagingWorkers
+	if workers <= 0 {
+		workers = config.EnvConfig.MaxWorkers
 	}
 
-	for _, m := range manifestList {
-		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
-		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
-		notDeleted := make([]iceberg.ManifestEntry, 0, max(0, capacity))
-		foundDeletedCount := 0
-		for entry, err := range of.base.iterManifestEntries(m, true) {
-			if err != nil {
-				return existingFiles, err
-			}
-			path := entry.DataFile().FilePath()
-			content := entry.DataFile().ContentType()
-			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+	results := make([]iceberg.ManifestFile, len(manifestList))
+	var progressMu sync.Mutex
+	completed := 0
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(min(workers, len(manifestList)))
+	var schedulingErr error
 
-			isData := content == iceberg.EntryContentData
-			matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
-			if matched {
-				foundDeletedCount++
-			} else {
-				notDeleted = append(notDeleted, entry)
-			}
+	for i, m := range manifestList {
+		if err := groupCtx.Err(); err != nil {
+			schedulingErr = err
+			break
 		}
+		i, m := i, m
+		group.Go(func() error {
+			// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+			capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
+			notDeleted := make([]iceberg.ManifestEntry, 0, max(0, capacity))
+			foundDeletedCount := 0
+			for entry, err := range of.base.iterManifestEntries(m, true) {
+				if err != nil {
+					return err
+				}
+				path := entry.DataFile().FilePath()
+				content := entry.DataFile().ContentType()
+				_, isDeletedData := of.base.deletedFiles[path]
+				_, isDeletedDelete := of.base.deletedDeleteFiles[path]
 
-		if foundDeletedCount == 0 {
-			existingFiles = append(existingFiles, m)
-
-			continue
-		}
-
-		if len(notDeleted) == 0 {
-			continue
-		}
-
-		// wrap in a function to ensure that the writer is closed even if a panic occurs
-		rewriteManifest := func(m iceberg.ManifestFile, notDeleted []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
-			spec, err := of.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
-			if err != nil {
-				return nil, err
-			}
-
-			wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec, iceberg.WithManifestWriterContent(m.ManifestContent()))
-			if err != nil {
-				return nil, err
-			}
-			defer internal.CheckedClose(fileCloser, &retErr)
-			defer internal.CheckedClose(wr, &retErr)
-
-			for _, entry := range notDeleted {
-				if err := wr.Existing(entry); err != nil {
-					return nil, err
+				isData := content == iceberg.EntryContentData
+				matched := (isDeletedData && isData) || (isDeletedDelete && !isData)
+				if matched {
+					foundDeletedCount++
+				} else {
+					notDeleted = append(notDeleted, entry)
 				}
 			}
 
-			// close the writer to force a flush and ensure counter.Count is accurate
-			if err := wr.Close(); err != nil {
-				return nil, err
+			if foundDeletedCount == 0 {
+				results[i] = m
+				if of.manifestStagingProgress != nil {
+					progressMu.Lock()
+					completed++
+					of.manifestStagingProgress(completed, len(manifestList))
+					progressMu.Unlock()
+				}
+				return nil
 			}
 
-			return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
-		}
+			if len(notDeleted) == 0 {
+				if of.manifestStagingProgress != nil {
+					progressMu.Lock()
+					completed++
+					of.manifestStagingProgress(completed, len(manifestList))
+					progressMu.Unlock()
+				}
+				return nil
+			}
 
-		mf, err := rewriteManifest(m, notDeleted)
-		if err != nil {
-			return existingFiles, err
-		}
+			// wrap in a function to ensure that the writer is closed even if a panic occurs
+			rewriteManifest := func(m iceberg.ManifestFile, notDeleted []iceberg.ManifestEntry) (_ iceberg.ManifestFile, retErr error) {
+				spec, err := of.base.txn.meta.GetSpecByID(int(m.PartitionSpecID()))
+				if err != nil {
+					return nil, err
+				}
 
-		existingFiles = append(existingFiles, mf)
+				wr, path, counter, fileCloser, err := of.base.newManifestWriter(*spec, iceberg.WithManifestWriterContent(m.ManifestContent()))
+				if err != nil {
+					return nil, err
+				}
+				defer internal.CheckedClose(fileCloser, &retErr)
+				defer internal.CheckedClose(wr, &retErr)
+
+				for _, entry := range notDeleted {
+					if err := wr.Existing(entry); err != nil {
+						return nil, err
+					}
+				}
+
+				// close the writer to force a flush and ensure counter.Count is accurate
+				if err := wr.Close(); err != nil {
+					return nil, err
+				}
+
+				return wr.ToManifestFile(path, counter.Count, iceberg.WithManifestFileContent(m.ManifestContent()))
+			}
+
+			mf, err := rewriteManifest(m, notDeleted)
+			if err != nil {
+				return err
+			}
+
+			results[i] = mf
+			if of.manifestStagingProgress != nil {
+				progressMu.Lock()
+				completed++
+				of.manifestStagingProgress(completed, len(manifestList))
+				progressMu.Unlock()
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	if schedulingErr != nil {
+		return nil, schedulingErr
 	}
 
+	existingFiles := make([]iceberg.ManifestFile, 0, len(results))
+	for _, manifest := range results {
+		if manifest != nil {
+			existingFiles = append(existingFiles, manifest)
+		}
+	}
 	return existingFiles, nil
 }
 
@@ -705,7 +760,7 @@ func (sp *snapshotProducer) manifests(ctx context.Context) (_ []iceberg.Manifest
 	}
 
 	g.Go(func() error {
-		m, err := sp.existingManifests()
+		m, err := sp.existingManifests(ctx)
 		if err != nil {
 			return err
 		}
