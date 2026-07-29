@@ -231,6 +231,89 @@ func TestReplaceFilesReadsManifestsConcurrently(t *testing.T) {
 	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
 }
 
+func TestReplaceDataFilesReadsManifestsConcurrently(t *testing.T) {
+	fileIO := &concurrentManifestReadIO{}
+	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 4 {
+		dataPath := fmt.Sprintf("%s/data/data-only-%03d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPath, arrowSc, fmt.Sprintf(`[{"id": %d, "data": "value"}]`, i))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+
+	replacement, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		tbl.Location()+"/data/data-only-replacement.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+
+	fileIO.enabled.Store(true)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.ReplaceDataFilesWithDataFiles(
+		t.Context(),
+		[]iceberg.DataFile{tasks[0].File},
+		[]iceberg.DataFile{replacement.Build()},
+		nil,
+		table.WithReplaceValidationConcurrency(4),
+	))
+	require.GreaterOrEqual(t, fileIO.max.Load(), int32(2))
+}
+
+func TestReplaceDataFilesValidationHonorsCanceledContext(t *testing.T) {
+	tbl := newReplaceFilesTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/canceled-source.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "value"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+
+	replacement, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		tbl.Location()+"/data/canceled-replacement.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	tx = tbl.NewTransaction()
+	err = tx.ReplaceDataFilesWithDataFiles(
+		ctx,
+		[]iceberg.DataFile{tasks[0].File},
+		[]iceberg.DataFile{replacement.Build()},
+		nil,
+		table.WithReplaceValidationConcurrency(4),
+	)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestRowDeltaValidatesReferencedDataFilesConcurrently(t *testing.T) {
 	fileIO := &concurrentManifestReadIO{}
 	tbl := newReplaceFilesTestTableWithIO(t, fileIO)

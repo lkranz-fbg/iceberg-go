@@ -794,19 +794,17 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		return err
 	}
 
-	markedForDeletion := make([]iceberg.DataFile, 0, len(setToDelete))
-	for df, err := range s.dataFiles(fs, nil) {
-		if err != nil {
-			return err
-		}
-
-		if _, ok := setToDelete[df.FilePath()]; ok {
-			markedForDeletion = append(markedForDeletion, df)
-		}
-
-		if _, ok := setToAdd[df.FilePath()]; ok {
-			return fmt.Errorf("cannot add files that are already referenced by table, files: %s", df.FilePath())
-		}
+	markedForDeletion, _, err := validateReplaceFiles(
+		ctx,
+		s,
+		fs,
+		setToDelete,
+		nil,
+		setToAdd,
+		cfg.replaceValidationWorkers,
+	)
+	if err != nil {
+		return err
 	}
 
 	if len(markedForDeletion) != len(setToDelete) {
