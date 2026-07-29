@@ -314,6 +314,57 @@ func TestReplaceDataFilesValidationHonorsCanceledContext(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 }
 
+func TestRewriteFilesForwardsValidationOptions(t *testing.T) {
+	fileIO := &concurrentManifestReadIO{}
+	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	for i := range 4 {
+		dataPath := fmt.Sprintf("%s/data/rewrite-options-%03d.parquet", tbl.Location(), i)
+		writeParquetFile(t, dataPath, arrowSc, fmt.Sprintf(`[{"id": %d, "data": "value"}]`, i))
+		tx := tbl.NewTransaction()
+		require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+		tbl, err = tx.Commit(t.Context())
+		require.NoError(t, err)
+	}
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.NotEmpty(t, tasks)
+	replacement, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		tbl.Location()+"/data/rewrite-options-replacement.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+
+	var progress []int
+	fileIO.enabled.Store(true)
+	tx := tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	rewrite.DeleteFile(tasks[0].File)
+	rewrite.AddDataFile(replacement.Build())
+	require.NoError(t, rewrite.Commit(
+		t.Context(),
+		table.WithReplaceValidationConcurrency(1),
+		table.WithReplaceValidationProgress(func(done, total int) {
+			progress = append(progress, done)
+			if done == total {
+				fileIO.enabled.Store(false)
+			}
+		}),
+	))
+
+	require.Equal(t, int32(1), fileIO.max.Load())
+	require.Equal(t, []int{0, 1, 2, 3, 4}, progress)
+}
+
 func TestRowDeltaValidatesReferencedDataFilesConcurrently(t *testing.T) {
 	fileIO := &concurrentManifestReadIO{}
 	tbl := newReplaceFilesTestTableWithIO(t, fileIO)

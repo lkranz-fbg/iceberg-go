@@ -583,10 +583,11 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
-	skipAutoNameMapping      bool
-	skipDuplicateCheck       bool
-	rewriteSemantics         bool
-	replaceValidationWorkers int
+	skipAutoNameMapping       bool
+	skipDuplicateCheck        bool
+	rewriteSemantics          bool
+	replaceValidationWorkers  int
+	replaceValidationProgress func(done, total int)
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -634,6 +635,13 @@ func WithReplaceValidationConcurrency(concurrency int) WriteOption {
 		if concurrency > 0 {
 			cfg.replaceValidationWorkers = concurrency
 		}
+	}
+}
+
+// WithReplaceValidationProgress reports successfully read manifests.
+func WithReplaceValidationProgress(progress func(done, total int)) WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.replaceValidationProgress = progress
 	}
 }
 
@@ -802,6 +810,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 		nil,
 		setToAdd,
 		cfg.replaceValidationWorkers,
+		cfg.replaceValidationProgress,
 	)
 	if err != nil {
 		return err
@@ -859,6 +868,7 @@ func validateReplaceFiles(
 	deletePaths map[string]struct{},
 	addPaths map[string]struct{},
 	concurrency int,
+	progress func(done, total int),
 ) ([]iceberg.DataFile, []iceberg.DataFile, error) {
 	manifests, err := s.Manifests(fs)
 	if err != nil {
@@ -867,11 +877,16 @@ func validateReplaceFiles(
 	if len(manifests) == 0 {
 		return nil, nil, nil
 	}
+	if progress != nil {
+		progress(0, len(manifests))
+	}
 	if concurrency <= 0 {
 		concurrency = runtime.GOMAXPROCS(0)
 	}
 
 	results := make([]replaceValidationResult, len(manifests))
+	var progressMu sync.Mutex
+	completed := 0
 	workers, workerCtx := errgroup.WithContext(ctx)
 	workers.SetLimit(min(concurrency, len(manifests)))
 	var schedulingErr error
@@ -901,6 +916,12 @@ func validateReplaceFiles(
 				}
 			}
 			results[i] = result
+			if progress != nil {
+				progressMu.Lock()
+				completed++
+				progress(completed, len(manifests))
+				progressMu.Unlock()
+			}
 			return nil
 		})
 	}
@@ -988,6 +1009,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 		setDeleteFilesToRemove,
 		setToAdd,
 		cfg.replaceValidationWorkers,
+		cfg.replaceValidationProgress,
 	)
 	if err != nil {
 		return err
