@@ -202,7 +202,8 @@ func (r *RewriteFiles) ApplyResult(gr CompactionGroupResult) *RewriteFiles {
 // [RewriteFiles.DeleteFile] had an unsupported content type, if the
 // builder has no file changes, or if the underlying
 // [Transaction.ReplaceFiles] call fails.
-func (r *RewriteFiles) Commit(ctx context.Context) error {
+// Options configure validation; rewrite isolation is always enforced.
+func (r *RewriteFiles) Commit(ctx context.Context, opts ...WriteOption) error {
 	if r.committed {
 		return fmt.Errorf("%w: RewriteFiles.Commit already called on this builder", ErrInvalidOperation)
 	}
@@ -224,7 +225,10 @@ func (r *RewriteFiles) Commit(ctx context.Context) error {
 		return fmt.Errorf("%w: rewrite must delete at least one data file when adding data files", ErrInvalidOperation)
 	}
 
-	if err := r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, withRewriteSemantics()); err != nil {
+	writeOpts := make([]WriteOption, 0, len(opts)+1)
+	writeOpts = append(writeOpts, opts...)
+	writeOpts = append(writeOpts, withRewriteSemantics())
+	if err := r.txn.ReplaceFiles(ctx, r.dataFilesToDelete, r.dataFilesToAdd, r.deleteFilesToRemove, r.snapshotProps, writeOpts...); err != nil {
 		return err
 	}
 
