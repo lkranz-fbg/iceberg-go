@@ -510,7 +510,7 @@ func TestOverwriteFilesExistingManifestsClosesWriterOnError(t *testing.T) {
 	sp := newOverwriteFilesProducer(OpOverwrite, txn, mem, nil, nil)
 	sp.deleteDataFile(deletedFile)
 
-	_, err = sp.existingManifests()
+	_, err = sp.existingManifests(context.Background())
 	require.ErrorIs(t, err, errLimitedWrite)
 }
 
@@ -709,7 +709,7 @@ func TestOverwriteExistingManifestsClosesUnderlyingFile(t *testing.T) {
 
 	trackIO.writers = make(map[string]*trackingWriteCloser)
 
-	_, err = sp.existingManifests()
+	_, err = sp.existingManifests(context.Background())
 	require.NoError(t, err, "existingManifests should succeed")
 
 	unclosed := trackIO.GetUnclosedWriters()
@@ -729,7 +729,7 @@ func (e *errorOnDeletedEntries) processManifests(manifests []iceberg.ManifestFil
 	return manifests, nil
 }
 
-func (e *errorOnDeletedEntries) existingManifests() ([]iceberg.ManifestFile, error) {
+func (e *errorOnDeletedEntries) existingManifests(context.Context) ([]iceberg.ManifestFile, error) {
 	return nil, nil
 }
 

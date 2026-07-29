@@ -588,6 +588,8 @@ type dataFileCfg struct {
 	rewriteSemantics          bool
 	replaceValidationWorkers  int
 	replaceValidationProgress func(done, total int)
+	replaceStagingWorkers     int
+	replaceStagingProgress    func(done, total int)
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -643,6 +645,28 @@ func WithReplaceValidationProgress(progress func(done, total int)) WriteOption {
 	return func(cfg *dataFileCfg) {
 		cfg.replaceValidationProgress = progress
 	}
+}
+
+// WithReplaceManifestStagingConcurrency bounds retained-manifest processing.
+func WithReplaceManifestStagingConcurrency(concurrency int) WriteOption {
+	return func(cfg *dataFileCfg) {
+		if concurrency > 0 {
+			cfg.replaceStagingWorkers = concurrency
+		}
+	}
+}
+
+// WithReplaceManifestStagingProgress reports staged source manifests.
+func WithReplaceManifestStagingProgress(progress func(done, total int)) WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.replaceStagingProgress = progress
+	}
+}
+
+func configureReplaceManifestStaging(producer *snapshotProducer, cfg dataFileCfg) {
+	overwrite := producer.producerImpl.(*overwriteFiles)
+	overwrite.manifestStagingWorkers = cfg.replaceStagingWorkers
+	overwrite.manifestStagingProgress = cfg.replaceStagingProgress
 }
 
 // ensureNameMapping sets the schema name mapping in table properties if one
@@ -833,6 +857,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	configureReplaceManifestStaging(updater, cfg)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -1035,6 +1060,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
+	configureReplaceManifestStaging(updater, cfg)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
