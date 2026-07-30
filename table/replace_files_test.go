@@ -395,7 +395,8 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	var progress []int
+	var deletedProgress []int
+	var stagingProgress []int
 	tx := tbl.NewTransaction()
 	rewrite := tx.NewRewrite(nil)
 	rewrite.DeleteFile(tasks[0].File)
@@ -403,9 +404,12 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 	require.NoError(t, rewrite.Commit(
 		t.Context(),
 		table.WithReplaceValidationConcurrency(1),
+		table.WithReplaceDeletedEntryCollectionProgress(func(done, _ int) {
+			deletedProgress = append(deletedProgress, done)
+		}),
 		table.WithReplaceManifestStagingConcurrency(2),
 		table.WithReplaceManifestStagingProgress(func(done, total int) {
-			progress = append(progress, done)
+			stagingProgress = append(stagingProgress, done)
 			if done == 0 {
 				fileIO.max.Store(0)
 				fileIO.enabled.Store(true)
@@ -417,7 +421,53 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 	))
 
 	require.Equal(t, int32(2), fileIO.max.Load())
-	require.Equal(t, []int{0, 1, 2, 3, 4}, progress)
+	require.Equal(t, []int{0, 1, 2, 3, 4}, deletedProgress)
+	require.Equal(t, []int{0, 1, 2, 3, 4}, stagingProgress)
+}
+
+func TestRewriteFilesCancelsDeletedEntryCollection(t *testing.T) {
+	tbl := newReplaceFilesTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+
+	dataPath := tbl.Location() + "/data/cancel-deleted-entry-collection.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "value"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	replacement, err := iceberg.NewDataFileBuilder(
+		*iceberg.UnpartitionedSpec,
+		iceberg.EntryContentData,
+		tbl.Location()+"/data/cancel-deleted-entry-replacement.parquet",
+		iceberg.ParquetFile,
+		nil,
+		nil,
+		nil,
+		1,
+		1,
+	)
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	var progress []int
+	tx = tbl.NewTransaction()
+	rewrite := tx.NewRewrite(nil)
+	rewrite.DeleteFile(tasks[0].File)
+	rewrite.AddDataFile(replacement.Build())
+	err = rewrite.Commit(
+		ctx,
+		table.WithReplaceDeletedEntryCollectionProgress(func(done, _ int) {
+			progress = append(progress, done)
+			cancel()
+		}),
+	)
+
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, []int{0}, progress)
 }
 
 func TestRowDeltaValidatesReferencedDataFilesConcurrently(t *testing.T) {

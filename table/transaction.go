@@ -588,6 +588,7 @@ type dataFileCfg struct {
 	rewriteSemantics          bool
 	replaceValidationWorkers  int
 	replaceValidationProgress func(done, total int)
+	replaceDeletedProgress    func(done, total int)
 	replaceStagingWorkers     int
 	replaceStagingProgress    func(done, total int)
 }
@@ -647,6 +648,13 @@ func WithReplaceValidationProgress(progress func(done, total int)) WriteOption {
 	}
 }
 
+// WithReplaceDeletedEntryCollectionProgress reports scanned source manifests.
+func WithReplaceDeletedEntryCollectionProgress(progress func(done, total int)) WriteOption {
+	return func(cfg *dataFileCfg) {
+		cfg.replaceDeletedProgress = progress
+	}
+}
+
 // WithReplaceManifestStagingConcurrency bounds retained-manifest processing.
 func WithReplaceManifestStagingConcurrency(concurrency int) WriteOption {
 	return func(cfg *dataFileCfg) {
@@ -663,8 +671,9 @@ func WithReplaceManifestStagingProgress(progress func(done, total int)) WriteOpt
 	}
 }
 
-func configureReplaceManifestStaging(producer *snapshotProducer, cfg dataFileCfg) {
+func configureReplaceManifestProcessing(producer *snapshotProducer, cfg dataFileCfg) {
 	overwrite := producer.producerImpl.(*overwriteFiles)
+	overwrite.deletedEntryProgress = cfg.replaceDeletedProgress
 	overwrite.manifestStagingWorkers = cfg.replaceStagingWorkers
 	overwrite.manifestStagingProgress = cfg.replaceStagingProgress
 }
@@ -857,7 +866,7 @@ func (t *Transaction) ReplaceDataFilesWithDataFiles(ctx context.Context, filesTo
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
-	configureReplaceManifestStaging(updater, cfg)
+	configureReplaceManifestProcessing(updater, cfg)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true
@@ -1060,7 +1069,7 @@ func (t *Transaction) ReplaceFiles(ctx context.Context, dataFilesToDelete, dataF
 
 	commitUUID := uuid.New()
 	updater := t.updateSnapshot(fs, snapshotProps, op).mergeOverwrite(&commitUUID, nil)
-	configureReplaceManifestStaging(updater, cfg)
+	configureReplaceManifestProcessing(updater, cfg)
 	if cfg.rewriteSemantics {
 		// mergeOverwrite guarantees an *overwriteFiles producerImpl.
 		updater.producerImpl.(*overwriteFiles).skipDefaultValidator = true

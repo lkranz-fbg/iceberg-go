@@ -33,7 +33,6 @@ import (
 	"github.com/apache/iceberg-go/config"
 	"github.com/apache/iceberg-go/internal"
 	iceio "github.com/apache/iceberg-go/io"
-	tblutils "github.com/apache/iceberg-go/table/internal"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -138,6 +137,7 @@ type overwriteFiles struct {
 	// semantically compatible with a rewrite.
 	skipDefaultValidator bool
 
+	deletedEntryProgress    func(done, total int)
 	manifestStagingWorkers  int
 	manifestStagingProgress func(done, total int)
 }
@@ -346,44 +346,67 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 	if err != nil {
 		return nil, err
 	}
-
-	getEntries := func(m iceberg.ManifestFile) ([]iceberg.ManifestEntry, error) {
-		// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
-		capacity := int(m.AddedDataFiles()) + int(m.ExistingDataFiles())
-		result := make([]iceberg.ManifestEntry, 0, max(0, capacity))
-		for entry, err := range of.base.iterManifestEntries(m, true) {
-			if err != nil {
-				return nil, err
-			}
-			path := entry.DataFile().FilePath()
-			content := entry.DataFile().ContentType()
-
-			_, isDeletedData := of.base.deletedFiles[path]
-			_, isDeletedDelete := of.base.deletedDeleteFiles[path]
-
-			if (isDeletedData && content == iceberg.EntryContentData) ||
-				(isDeletedDelete && content != iceberg.EntryContentData) {
-				seqNum := entry.SequenceNum()
-				result = append(result,
-					iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
-						&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
-						entry.DataFile()))
-			}
-		}
-
-		return result, nil
+	if len(previousManifests) == 0 {
+		return nil, nil
+	}
+	if of.deletedEntryProgress != nil {
+		of.deletedEntryProgress(0, len(previousManifests))
 	}
 
-	nWorkers := config.EnvConfig.MaxWorkers
-	finalResult := make([]iceberg.ManifestEntry, 0, len(previousManifests))
-	for entries, err := range tblutils.MapExec(ctx, nWorkers, slices.Values(previousManifests), getEntries) {
-		if err != nil {
-			return nil, err
+	results := make([][]iceberg.ManifestEntry, len(previousManifests))
+	var progressMu sync.Mutex
+	completed := 0
+	group, groupCtx := errgroup.WithContext(ctx)
+	group.SetLimit(min(config.EnvConfig.MaxWorkers, len(previousManifests)))
+	var schedulingErr error
+	for i, manifest := range previousManifests {
+		if err := groupCtx.Err(); err != nil {
+			schedulingErr = err
+			break
 		}
-		finalResult = append(finalResult, entries...)
+		i, manifest := i, manifest
+		group.Go(func() error {
+			// Counts may be -1 (unset) on V1 manifests, so clamp before allocating.
+			capacity := int(manifest.AddedDataFiles()) + int(manifest.ExistingDataFiles())
+			result := make([]iceberg.ManifestEntry, 0, max(0, capacity))
+			for entry, err := range of.base.iterManifestEntries(manifest, true) {
+				if err != nil {
+					return err
+				}
+				path := entry.DataFile().FilePath()
+				content := entry.DataFile().ContentType()
+
+				_, isDeletedData := of.base.deletedFiles[path]
+				_, isDeletedDelete := of.base.deletedDeleteFiles[path]
+
+				if (isDeletedData && content == iceberg.EntryContentData) ||
+					(isDeletedDelete && content != iceberg.EntryContentData) {
+					seqNum := entry.SequenceNum()
+					result = append(result,
+						iceberg.NewManifestEntry(iceberg.EntryStatusDELETED,
+							&of.base.snapshotID, &seqNum, entry.FileSequenceNum(),
+							entry.DataFile()))
+				}
+			}
+
+			results[i] = result
+			if of.deletedEntryProgress != nil {
+				progressMu.Lock()
+				completed++
+				of.deletedEntryProgress(completed, len(previousManifests))
+				progressMu.Unlock()
+			}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	if schedulingErr != nil {
+		return nil, schedulingErr
 	}
 
-	return finalResult, nil
+	return slices.Concat(results...), nil
 }
 
 func (of *overwriteFiles) needsValidation() bool { return true }
