@@ -365,7 +365,7 @@ func TestRewriteFilesForwardsValidationOptions(t *testing.T) {
 	require.Equal(t, []int{0, 1, 2, 3, 4}, progress)
 }
 
-func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
+func TestRewriteFilesBoundsDeletedEntryAndManifestStagingConcurrency(t *testing.T) {
 	fileIO := &concurrentManifestReadIO{}
 	tbl := newReplaceFilesTestTableWithIO(t, fileIO)
 	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
@@ -397,6 +397,7 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 
 	var deletedProgress []int
 	var stagingProgress []int
+	var deletedMax int32
 	tx := tbl.NewTransaction()
 	rewrite := tx.NewRewrite(nil)
 	rewrite.DeleteFile(tasks[0].File)
@@ -404,8 +405,17 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 	require.NoError(t, rewrite.Commit(
 		t.Context(),
 		table.WithReplaceValidationConcurrency(1),
-		table.WithReplaceDeletedEntryCollectionProgress(func(done, _ int) {
+		table.WithReplaceDeletedEntryCollectionConcurrency(2),
+		table.WithReplaceDeletedEntryCollectionProgress(func(done, total int) {
 			deletedProgress = append(deletedProgress, done)
+			if done == 0 {
+				fileIO.max.Store(0)
+				fileIO.enabled.Store(true)
+			}
+			if done == total {
+				fileIO.enabled.Store(false)
+				deletedMax = fileIO.max.Load()
+			}
 		}),
 		table.WithReplaceManifestStagingConcurrency(2),
 		table.WithReplaceManifestStagingProgress(func(done, total int) {
@@ -420,6 +430,7 @@ func TestRewriteFilesStagesExistingManifestsConcurrently(t *testing.T) {
 		}),
 	))
 
+	require.Equal(t, int32(2), deletedMax)
 	require.Equal(t, int32(2), fileIO.max.Load())
 	require.Equal(t, []int{0, 1, 2, 3, 4}, deletedProgress)
 	require.Equal(t, []int{0, 1, 2, 3, 4}, stagingProgress)

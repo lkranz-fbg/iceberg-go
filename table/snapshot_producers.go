@@ -137,6 +137,7 @@ type overwriteFiles struct {
 	// semantically compatible with a rewrite.
 	skipDefaultValidator bool
 
+	deletedEntryWorkers     int
 	deletedEntryProgress    func(done, total int)
 	manifestStagingWorkers  int
 	manifestStagingProgress func(done, total int)
@@ -357,7 +358,11 @@ func (of *overwriteFiles) deletedEntries(ctx context.Context) ([]iceberg.Manifes
 	var progressMu sync.Mutex
 	completed := 0
 	group, groupCtx := errgroup.WithContext(ctx)
-	group.SetLimit(min(config.EnvConfig.MaxWorkers, len(previousManifests)))
+	workers := of.deletedEntryWorkers
+	if workers <= 0 {
+		workers = config.EnvConfig.MaxWorkers
+	}
+	group.SetLimit(min(workers, len(previousManifests)))
 	var schedulingErr error
 	for i, manifest := range previousManifests {
 		if err := groupCtx.Err(); err != nil {

@@ -583,14 +583,15 @@ func (t *Transaction) validateDataFilesToAdd(dataFiles []iceberg.DataFile, opera
 type WriteOption func(*dataFileCfg)
 
 type dataFileCfg struct {
-	skipAutoNameMapping       bool
-	skipDuplicateCheck        bool
-	rewriteSemantics          bool
-	replaceValidationWorkers  int
-	replaceValidationProgress func(done, total int)
-	replaceDeletedProgress    func(done, total int)
-	replaceStagingWorkers     int
-	replaceStagingProgress    func(done, total int)
+	skipAutoNameMapping        bool
+	skipDuplicateCheck         bool
+	rewriteSemantics           bool
+	replaceValidationWorkers   int
+	replaceValidationProgress  func(done, total int)
+	replaceDeletedEntryWorkers int
+	replaceDeletedProgress     func(done, total int)
+	replaceStagingWorkers      int
+	replaceStagingProgress     func(done, total int)
 }
 
 // withRewriteSemantics marks an overwrite/replace operation as a
@@ -648,6 +649,15 @@ func WithReplaceValidationProgress(progress func(done, total int)) WriteOption {
 	}
 }
 
+// WithReplaceDeletedEntryCollectionConcurrency bounds concurrent manifest reads.
+func WithReplaceDeletedEntryCollectionConcurrency(concurrency int) WriteOption {
+	return func(cfg *dataFileCfg) {
+		if concurrency > 0 {
+			cfg.replaceDeletedEntryWorkers = concurrency
+		}
+	}
+}
+
 // WithReplaceDeletedEntryCollectionProgress reports scanned source manifests.
 func WithReplaceDeletedEntryCollectionProgress(progress func(done, total int)) WriteOption {
 	return func(cfg *dataFileCfg) {
@@ -673,6 +683,7 @@ func WithReplaceManifestStagingProgress(progress func(done, total int)) WriteOpt
 
 func configureReplaceManifestProcessing(producer *snapshotProducer, cfg dataFileCfg) {
 	overwrite := producer.producerImpl.(*overwriteFiles)
+	overwrite.deletedEntryWorkers = cfg.replaceDeletedEntryWorkers
 	overwrite.deletedEntryProgress = cfg.replaceDeletedProgress
 	overwrite.manifestStagingWorkers = cfg.replaceStagingWorkers
 	overwrite.manifestStagingProgress = cfg.replaceStagingProgress
