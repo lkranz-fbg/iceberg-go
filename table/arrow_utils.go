@@ -1492,13 +1492,14 @@ func binPackRecords(itr iter.Seq2[arrow.RecordBatch, error], recordLookback int,
 }
 
 type recordWritingArgs struct {
-	sc              *arrow.Schema
-	itr             iter.Seq2[arrow.RecordBatch, error]
-	fs              iceio.WriteFileIO
-	writeUUID       *uuid.UUID
-	counter         iter.Seq[int]
-	maxWriteWorkers int
-	clustered       bool
+	sc                    *arrow.Schema
+	itr                   iter.Seq2[arrow.RecordBatch, error]
+	fs                    iceio.WriteFileIO
+	writeUUID             *uuid.UUID
+	counter               iter.Seq[int]
+	maxWriteWorkers       int
+	recordBatchBufferSize int
+	clustered             bool
 }
 
 func recordsToDataFiles(ctx context.Context, rootLocation string, meta *MetadataBuilder, args recordWritingArgs) (ret iter.Seq2[iceberg.DataFile, error]) {

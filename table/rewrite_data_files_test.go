@@ -336,6 +336,32 @@ func TestExecuteCompactionGroup_ScanConcurrencyForwarded(t *testing.T) {
 		"setting scan concurrency must not change the set of consolidated outputs")
 }
 
+func TestExecuteCompactionGroup_RecordBatchBufferForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/file.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[{"id": 1, "data": "row-1"}]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	group := table.CompactionTaskGroup{Tasks: tasks, TotalSizeBytes: tasks[0].File.FileSizeBytes()}
+	result, err := table.ExecuteCompactionGroup(
+		t.Context(),
+		tbl,
+		group,
+		table.WithCompactionRecordBatchBufferSize(1),
+	)
+	require.NoError(t, err)
+	require.Len(t, result.OldDataFiles, 1)
+	require.Len(t, result.NewDataFiles, 1)
+}
+
 // TestRewriteDataFiles_GroupOptionsForwarded verifies that
 // RewriteDataFilesOptions.GroupOptions are piped through to every
 // ExecuteCompactionGroup call.

@@ -35,10 +35,11 @@ import (
 type WriteRecordOption func(*writeRecordConfig)
 
 type writeRecordConfig struct {
-	targetFileSize  int64
-	writeUUID       *uuid.UUID
-	maxWriteWorkers int
-	clustered       bool
+	targetFileSize        int64
+	writeUUID             *uuid.UUID
+	maxWriteWorkers       int
+	recordBatchBufferSize int
+	clustered             bool
 }
 
 // WithTargetFileSize overrides the table's default target file size.
@@ -68,6 +69,13 @@ func WithWriteUUID(id uuid.UUID) WriteRecordOption {
 func WithMaxWriteWorkers(n int) WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.maxWriteWorkers = n
+	}
+}
+
+// WithRecordBatchBufferSize bounds decoded Arrow batches queued per writer; zero keeps the default.
+func WithRecordBatchBufferSize(n int) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.recordBatchBufferSize = n
 	}
 }
 
@@ -121,6 +129,10 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.recordBatchBufferSize < 0 {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			fmt.Errorf("record batch buffer size must be non-negative, got %d", cfg.recordBatchBufferSize))
+	}
 
 	if cfg.clustered && cfg.maxWriteWorkers > 0 {
 		return internal.SingleErrorIter[iceberg.DataFile](
@@ -166,12 +178,13 @@ func WriteRecords(ctx context.Context, tbl *Table,
 	}
 
 	args := recordWritingArgs{
-		sc:              schema,
-		itr:             releasing,
-		fs:              writeFS,
-		writeUUID:       cfg.writeUUID,
-		maxWriteWorkers: cfg.maxWriteWorkers,
-		clustered:       cfg.clustered,
+		sc:                    schema,
+		itr:                   releasing,
+		fs:                    writeFS,
+		writeUUID:             cfg.writeUUID,
+		maxWriteWorkers:       cfg.maxWriteWorkers,
+		recordBatchBufferSize: cfg.recordBatchBufferSize,
+		clustered:             cfg.clustered,
 	}
 
 	return recordsToDataFiles(ctx, tbl.Location(), meta, args)

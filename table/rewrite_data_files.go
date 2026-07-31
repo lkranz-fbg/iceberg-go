@@ -157,8 +157,9 @@ type RewriteDataFilesOptions struct {
 type CompactionGroupOption func(*compactionGroupConfig)
 
 type compactionGroupConfig struct {
-	targetFileSize  int64
-	scanConcurrency int
+	targetFileSize        int64
+	scanConcurrency       int
+	recordBatchBufferSize int
 }
 
 // WithCompactionTargetFileSize sets the size target for output files
@@ -185,6 +186,13 @@ func WithCompactionTargetFileSize(size int64) CompactionGroupOption {
 func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.scanConcurrency = n
+	}
+}
+
+// WithCompactionRecordBatchBufferSize bounds decoded Arrow batches queued by the group's Parquet writer.
+func WithCompactionRecordBatchBufferSize(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.recordBatchBufferSize = n
 	}
 }
 
@@ -299,6 +307,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	writeOpts := []WriteRecordOption{WithClusteredWrite()}
 	if cfg.targetFileSize > 0 {
 		writeOpts = append(writeOpts, WithTargetFileSize(cfg.targetFileSize))
+	}
+	if cfg.recordBatchBufferSize != 0 {
+		writeOpts = append(writeOpts, WithRecordBatchBufferSize(cfg.recordBatchBufferSize))
 	}
 
 	var (
