@@ -33,16 +33,19 @@ import (
 	"github.com/google/uuid"
 )
 
+const defaultRecordBatchBufferSize = 64
+
 // writerFactory manages the creation and lifecycle of RollingDataWriter instances
 // for different partitions, providing shared configuration and coordination
 // across all writers in a partitioned write operation.
 type writerFactory struct {
-	rootLocation   string
-	rootURL        *url.URL
-	fs             iceio.WriteFileIO
-	writeUUID      *uuid.UUID
-	taskSchema     *iceberg.Schema
-	targetFileSize int64
+	rootLocation          string
+	rootURL               *url.URL
+	fs                    iceio.WriteFileIO
+	writeUUID             *uuid.UUID
+	taskSchema            *iceberg.Schema
+	targetFileSize        int64
+	recordBatchBufferSize int
 
 	locProvider      LocationProvider
 	fileSchema       *iceberg.Schema
@@ -145,22 +148,26 @@ func newWriterFactory(rootLocation string, args recordWritingArgs, meta *Metadat
 	}
 
 	f := &writerFactory{
-		rootLocation:   rootLocation,
-		rootURL:        rootURL,
-		fs:             args.fs,
-		writeUUID:      args.writeUUID,
-		taskSchema:     taskSchema,
-		targetFileSize: targetFileSize,
-		locProvider:    locProvider,
-		fileSchema:     fileSchema,
-		arrowSchema:    arrowSchema,
-		writeProps:     format.GetWriteProperties(meta.props),
-		currentSpec:    *currentSpec,
-		fileFormat:     fileFormat,
-		format:         format,
-		nextCount:      nextCount,
-		stopCount:      stopCount,
-		sortOrderID:    meta.defaultSortOrderID,
+		rootLocation:          rootLocation,
+		rootURL:               rootURL,
+		fs:                    args.fs,
+		writeUUID:             args.writeUUID,
+		taskSchema:            taskSchema,
+		targetFileSize:        targetFileSize,
+		recordBatchBufferSize: defaultRecordBatchBufferSize,
+		locProvider:           locProvider,
+		fileSchema:            fileSchema,
+		arrowSchema:           arrowSchema,
+		writeProps:            format.GetWriteProperties(meta.props),
+		currentSpec:           *currentSpec,
+		fileFormat:            fileFormat,
+		format:                format,
+		nextCount:             nextCount,
+		stopCount:             stopCount,
+		sortOrderID:           meta.defaultSortOrderID,
+	}
+	if args.recordBatchBufferSize > 0 {
+		f.recordBatchBufferSize = args.recordBatchBufferSize
 	}
 	for _, apply := range opts {
 		apply(f)
@@ -252,7 +259,7 @@ func (w *writerFactory) newRollingDataWriter(ctx context.Context, concurrentWrit
 	writer := &RollingDataWriter{
 		partitionKey:     partition,
 		partitionID:      partitionID,
-		recordCh:         make(chan arrow.RecordBatch, 64),
+		recordCh:         make(chan arrow.RecordBatch, w.recordBatchBufferSize),
 		errorCh:          make(chan error, 1),
 		factory:          w,
 		partitionValues:  partitionValues,

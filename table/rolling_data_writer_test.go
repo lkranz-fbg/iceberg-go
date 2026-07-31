@@ -146,6 +146,23 @@ func (s *RollingDataWriterTestSuite) TestSingleFileUnderTarget() {
 	s.Equal(int64(5), dataFiles[0].Count())
 }
 
+func (s *RollingDataWriterTestSuite) TestRecordBatchBufferSizeIsBounded() {
+	arrSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+	}, nil)
+
+	loc := filepath.ToSlash(s.T().TempDir())
+	factory, _ := s.createWriterFactory(loc, arrSchema, 1024*1024)
+	factory.recordBatchBufferSize = 1
+	defer factory.closeAll()
+
+	outputCh := make(chan iceberg.DataFile, 1)
+	writer := factory.newRollingDataWriter(s.ctx, nil, "", nil, outputCh)
+	s.Equal(1, cap(writer.recordCh))
+	s.Require().NoError(writer.closeAndWait())
+}
+
 func (s *RollingDataWriterTestSuite) TestRollsMultipleFiles() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
