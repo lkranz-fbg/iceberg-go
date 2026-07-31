@@ -196,6 +196,7 @@ type Scan struct {
 
 	partitionFilters *keyDefaultMap[int, iceberg.BooleanExpression]
 	concurrency      int
+	readBatchSize    int
 }
 
 func (scan *Scan) UseRowLimit(n int64) *Scan {
@@ -669,6 +670,7 @@ func (scan *Scan) ReadTasks(ctx context.Context, tasks []FileScanTask) (*arrow.S
 		rowLimit:        scan.limit,
 		options:         scan.options,
 		concurrency:     scan.concurrency,
+		readBatchSize:   scan.readBatchSize,
 	}).GetRecords(ctx, tasks)
 }
 

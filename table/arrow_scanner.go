@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"maps"
 	"strconv"
 	"sync"
 
@@ -285,6 +286,7 @@ type arrowScan struct {
 
 	useLargeTypes bool
 	concurrency   int
+	readBatchSize int
 
 	nameMapping iceberg.NameMapping
 }
@@ -890,7 +892,15 @@ func (as *arrowScan) GetRecords(ctx context.Context, tasks []FileScanTask) (*arr
 		as.useLargeTypes = false
 	}
 
-	ctx = internal.WithTableProperties(ctx, as.metadata.Properties())
+	tableProperties := as.metadata.Properties()
+	if as.readBatchSize > 0 {
+		tableProperties = maps.Clone(tableProperties)
+		if tableProperties == nil {
+			tableProperties = make(iceberg.Properties)
+		}
+		tableProperties[ParquetBatchSizeKey] = strconv.Itoa(as.readBatchSize)
+	}
+	ctx = internal.WithTableProperties(ctx, tableProperties)
 
 	resultSchema, err := SchemaToArrowSchema(as.projectedSchema, nil, false, as.useLargeTypes)
 	if err != nil {

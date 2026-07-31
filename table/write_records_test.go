@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -112,6 +113,33 @@ func (s *WriteRecordsTestSuite) TestBasicWrite() {
 	s.Equal(iceberg.ParquetFile, dataFiles[0].FileFormat())
 	s.Greater(dataFiles[0].FileSizeBytes(), int64(0))
 	s.Contains(dataFiles[0].FilePath(), loc)
+}
+
+func (s *WriteRecordsTestSuite) TestParquetRowGroupLimit() {
+	loc := filepath.ToSlash(s.T().TempDir())
+	tbl := s.newTable(loc)
+	schema := s.arrowSchema()
+	records := func(yield func(arrow.RecordBatch, error) bool) {
+		yield(s.buildRecords(schema, 10), nil)
+	}
+
+	var dataFiles []iceberg.DataFile
+	for df, err := range table.WriteRecords(
+		s.ctx,
+		tbl,
+		schema,
+		records,
+		table.WithParquetRowGroupLimit(3),
+	) {
+		s.Require().NoError(err)
+		dataFiles = append(dataFiles, df)
+	}
+	s.Require().Len(dataFiles, 1)
+
+	rdr, err := file.OpenParquetFile(dataFiles[0].FilePath(), false)
+	s.Require().NoError(err)
+	defer rdr.Close()
+	s.Equal(4, rdr.MetaData().NumRowGroups())
 }
 
 func (s *WriteRecordsTestSuite) TestSmallTargetFileSizeProducesMultipleFiles() {

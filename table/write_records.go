@@ -39,6 +39,7 @@ type writeRecordConfig struct {
 	writeUUID             *uuid.UUID
 	maxWriteWorkers       int
 	recordBatchBufferSize int
+	parquetRowGroupLimit  int64
 	clustered             bool
 }
 
@@ -76,6 +77,13 @@ func WithMaxWriteWorkers(n int) WriteRecordOption {
 func WithRecordBatchBufferSize(n int) WriteRecordOption {
 	return func(c *writeRecordConfig) {
 		c.recordBatchBufferSize = n
+	}
+}
+
+// WithParquetRowGroupLimit bounds rows buffered before a Parquet row group is flushed.
+func WithParquetRowGroupLimit(n int64) WriteRecordOption {
+	return func(c *writeRecordConfig) {
+		c.parquetRowGroupLimit = n
 	}
 }
 
@@ -133,6 +141,10 @@ func WriteRecords(ctx context.Context, tbl *Table,
 		return internal.SingleErrorIter[iceberg.DataFile](
 			fmt.Errorf("record batch buffer size must be non-negative, got %d", cfg.recordBatchBufferSize))
 	}
+	if cfg.parquetRowGroupLimit < 0 {
+		return internal.SingleErrorIter[iceberg.DataFile](
+			fmt.Errorf("parquet row group limit must be non-negative, got %d", cfg.parquetRowGroupLimit))
+	}
 
 	if cfg.clustered && cfg.maxWriteWorkers > 0 {
 		return internal.SingleErrorIter[iceberg.DataFile](
@@ -159,6 +171,12 @@ func WriteRecords(ctx context.Context, tbl *Table,
 			meta.props = make(iceberg.Properties)
 		}
 		meta.props[WriteTargetFileSizeBytesKey] = strconv.FormatInt(cfg.targetFileSize, 10)
+	}
+	if cfg.parquetRowGroupLimit > 0 {
+		if meta.props == nil {
+			meta.props = make(iceberg.Properties)
+		}
+		meta.props[ParquetRowGroupLimitKey] = strconv.FormatInt(cfg.parquetRowGroupLimit, 10)
 	}
 
 	releasing := func(yield func(arrow.RecordBatch, error) bool) {
