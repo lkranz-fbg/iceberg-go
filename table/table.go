@@ -806,6 +806,17 @@ func WitMaxConcurrency(n int) ScanOption {
 	}
 }
 
+// WithArrowBatchSize bounds the rows decoded into each Arrow record batch.
+func WithArrowBatchSize(n int) ScanOption {
+	if n <= 0 {
+		return noopOption
+	}
+
+	return func(scan *Scan) {
+		scan.readBatchSize = n
+	}
+}
+
 func WithOptions(opts iceberg.Properties) ScanOption {
 	if opts == nil {
 		return noopOption

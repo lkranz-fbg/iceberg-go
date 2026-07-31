@@ -160,6 +160,8 @@ type compactionGroupConfig struct {
 	targetFileSize        int64
 	scanConcurrency       int
 	recordBatchBufferSize int
+	readBatchSize         int
+	parquetRowGroupLimit  int64
 }
 
 // WithCompactionTargetFileSize sets the size target for output files
@@ -193,6 +195,20 @@ func WithCompactionScanConcurrency(n int) CompactionGroupOption {
 func WithCompactionRecordBatchBufferSize(n int) CompactionGroupOption {
 	return func(c *compactionGroupConfig) {
 		c.recordBatchBufferSize = n
+	}
+}
+
+// WithCompactionReadBatchSize bounds rows decoded into each Arrow record batch.
+func WithCompactionReadBatchSize(n int) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.readBatchSize = n
+	}
+}
+
+// WithCompactionParquetRowGroupLimit bounds rows buffered by the Parquet writer.
+func WithCompactionParquetRowGroupLimit(n int64) CompactionGroupOption {
+	return func(c *compactionGroupConfig) {
+		c.parquetRowGroupLimit = n
 	}
 }
 
@@ -296,6 +312,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	if cfg.scanConcurrency > 0 {
 		scanOpts = append(scanOpts, WitMaxConcurrency(cfg.scanConcurrency))
 	}
+	if cfg.readBatchSize > 0 {
+		scanOpts = append(scanOpts, WithArrowBatchSize(cfg.readBatchSize))
+	}
 
 	arrowSchema, records, err := tbl.Scan(scanOpts...).ReadTasks(ctx, group.Tasks)
 	if err != nil {
@@ -310,6 +329,9 @@ func ExecuteCompactionGroup(ctx context.Context, tbl *Table, group CompactionTas
 	}
 	if cfg.recordBatchBufferSize != 0 {
 		writeOpts = append(writeOpts, WithRecordBatchBufferSize(cfg.recordBatchBufferSize))
+	}
+	if cfg.parquetRowGroupLimit != 0 {
+		writeOpts = append(writeOpts, WithParquetRowGroupLimit(cfg.parquetRowGroupLimit))
 	}
 
 	var (

@@ -27,6 +27,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
+	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/iceberg-go"
 	iceio "github.com/apache/iceberg-go/io"
 	"github.com/apache/iceberg-go/table"
@@ -360,6 +361,52 @@ func TestExecuteCompactionGroup_RecordBatchBufferForwarded(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.OldDataFiles, 1)
 	require.Len(t, result.NewDataFiles, 1)
+}
+
+func TestExecuteCompactionGroup_DecodedRowBoundsForwarded(t *testing.T) {
+	tbl := newRewriteTestTable(t)
+	arrowSc, err := table.SchemaToArrowSchema(tbl.Schema(), nil, false, false)
+	require.NoError(t, err)
+	dataPath := tbl.Location() + "/data/file.parquet"
+	writeParquetFile(t, dataPath, arrowSc, `[
+		{"id":1,"data":"a"},{"id":2,"data":"b"},{"id":3,"data":"c"},
+		{"id":4,"data":"d"},{"id":5,"data":"e"},{"id":6,"data":"f"},
+		{"id":7,"data":"g"},{"id":8,"data":"h"},{"id":9,"data":"i"},
+		{"id":10,"data":"j"}
+	]`)
+	tx := tbl.NewTransaction()
+	require.NoError(t, tx.AddFiles(t.Context(), []string{dataPath}, nil, false))
+	tbl, err = tx.Commit(t.Context())
+	require.NoError(t, err)
+
+	tasks, err := tbl.Scan().PlanFiles(t.Context())
+	require.NoError(t, err)
+	_, records, err := tbl.Scan(table.WithArrowBatchSize(3)).ReadTasks(t.Context(), tasks)
+	require.NoError(t, err)
+	var rows int64
+	for rec, readErr := range records {
+		require.NoError(t, readErr)
+		require.LessOrEqual(t, rec.NumRows(), int64(3))
+		rows += rec.NumRows()
+		rec.Release()
+	}
+	require.Equal(t, int64(10), rows)
+
+	group := table.CompactionTaskGroup{Tasks: tasks, TotalSizeBytes: tasks[0].File.FileSizeBytes()}
+	result, err := table.ExecuteCompactionGroup(
+		t.Context(),
+		tbl,
+		group,
+		table.WithCompactionReadBatchSize(3),
+		table.WithCompactionParquetRowGroupLimit(3),
+	)
+	require.NoError(t, err)
+	require.Len(t, result.NewDataFiles, 1)
+
+	rdr, err := file.OpenParquetFile(result.NewDataFiles[0].FilePath(), false)
+	require.NoError(t, err)
+	defer rdr.Close()
+	require.Equal(t, 4, rdr.MetaData().NumRowGroups())
 }
 
 // TestRewriteDataFiles_GroupOptionsForwarded verifies that
